@@ -239,6 +239,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        async.run(main())
+        asyncio.run(main())
     except KeyboardInterrupt:
-        print("Бот выключен.")
+        pass
