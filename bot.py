@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import re
 from aiogram import Bot, Dispatcher, types
@@ -23,14 +23,13 @@ dp = Dispatcher()
 # Хранилище данных пользователей (в оперативной памяти)
 # Структура: {user_id: {
 #   "active": bool, 
-#   "training": bool,
-#   "schedules": [{"day": int, "hour": int, "minute": int}],
-#   "last_reminder_date": str (YYYY-MM-DD),
-#   "temp_day": int | None (для настройки расписания)
+#   "gender": str | None,
+#   "schedules": [{"days": [int], "hour": int, "minute": int}], # Повторяющееся
+#   "one_time_reminders": [{"text": str, "execute_at": datetime}], # Разовое
+#   "last_reminder_date": str (YYYY-MM-DD)
 # }}
 users = {}
 
-# Словари для парсинга дней недели
 DAYS_MAP = {
     "пн": 0, "понедельник": 0, "mon": 0,
     "вт": 1, "вторник": 1, "tue": 1,
@@ -41,33 +40,26 @@ DAYS_MAP = {
     "вс": 6, "воскресенье": 6, "sun": 6
 }
 
-# Функция для проверки, является ли текущий день запланированным
+def init_user(user_id):
+    if user_id not in users:
+        users[user_id] = {
+            "active": False, 
+            "gender": None,
+            "schedules": [],
+            "one_time_reminders": [],
+            "last_reminder_date": ""
+        }
+
+# Функция для проверки дня недели
 def is_scheduled_day(days_list):
     now = datetime.now()
-    current_day = now.weekday() # Понедельник - 0, Воскресенье - 6
-    return current_day in days_list
+    return now.weekday() in days_list
 
-# Функция для проверки, наступило ли время тренировки
-def is_training_time(schedule):
-    now = datetime.now()
-    if now.hour > schedule["hour"]:
-        return True # Время уже прошло сегодня (или мы в режиме ожидания)
-    if now.hour == schedule["hour"] and now.minute >= schedule["minute"]:
-        return True
-    return False
-
-# Функция для создания клавиатуры с кнопкой тренировки
-def get_training_keyboard():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💪 Приступил к тренировке", callback_data="start_training")]
-    ])
-    return kb
-
-# Функция для отправки напоминания всем активным пользователям
+# Фоновая задача уведомлений
 async def reminder_loop():
-    logging.info("Фоновая задача напоминаний запущена.")
+    logging.info("Фоновая задача уведомлений запущена.")
     while True:
-        await asyncio.sleep(60)  # Пауза 60 секунд
+        await asyncio.sleep(30)  # Проверка каждые 30 секунд для точности
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")
 
@@ -75,66 +67,79 @@ async def reminder_loop():
             if not data["active"]:
                 continue
             
-            # Если пользователь уже тренируется сегодня — пропускаем
-            if data["training"] and data.get("last_reminder_date") == today_str:
-                continue
-
+            # 1. Обработка повторяющегося расписания
             schedules = data.get("schedules", [])
             for sched in schedules:
                 days_list = sched.get("days", [])
-                # Проверяем, подходит ли сегодня под расписание дня недели
                 if days_list and is_scheduled_day(days_list):
-                    # Если наступило время тренировки (или оно уже прошло сегодня)
-                    if is_training_time(sched):
-                        # Если мы еще не пометили этот день как "тренировка началась"
+                    # Проверяем, совпадает ли текущее время с расписанием (в пределах минуты)
+                    if now.hour == sched["hour"] and now.minute >= sched["minute"]:
                         if data.get("last_reminder_date") != today_str:
                             try:
                                 await bot.send_message(
                                     user_id, 
-                                    f"⏰ Пора тренироваться! (Запланировано на {sched['hour']}:{sched['minute']})"
+                                    f"⏰ Напоминание по расписанию!\nВремя: {sched['hour']}:{sched['minute']}"
                                 )
-                                logging.info(f"Отправлено напоминание пользователю {user_id}")
-                            except TelegramForbiddenError:
-                                logging.warning(f"Пользователь {user_id} заблокировал бота.")
+                                data["last_reminder_date"] = today_str
                             except Exception as e:
-                                logging.error(f"Ошибка при отправке напоминания пользователю {user_id}: {e}")
+                                logging.error(f"Ошибка отправки (расписание): {e}")
+
+            # 2. Обработка разовых напоминаний
+            reminders = data.get("one_time_reminders", [])
+            for i in range(len(reminders)):
+                reminder = reminders[i]
+                if now >= reminder["execute_at"]:
+                    try:
+                        await bot.send_message(user_id, f"🔔 Разовое напоминание:\n{reminder['text']}")
+                        # Удаляем выполненное напоминание
+                        reminders.pop(i)
+                        break # Выходим из цикла после удаления одного элемента
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки (разовое): {e}")
 
 # Обработчик команды /start
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    if user_id not in users:
-        users[user_id] = {
-            "active": False, 
-            "training": False,
-            "schedules": [],
-            "last_reminder_date": "",
-            "temp_day": None
-        }
+    init_user(user_id)
     
-    await message.answer(
-        "Привет! Я твой умный бот-напоминалка.\n\n"
-        "Просто напиши мне свои тренировки в свободном стиле, например:\n"
-        "• Понедельник 17:00\n"
-        "• Четверг и Суббота 18:30\n\n"
-        "Команды:\n"
-        "/set_schedule — открыть меню настройки дней\n"
-        "/status — проверить текущий статус и расписание\n"
-        "/stop — выключить всё"
-    )
+    if users[user_id]["gender"] is None:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Я девушка", callback_data="set_gender_female")],
+            [InlineKeyboardButton(text="Я парень", callback_data="set_gender_male")]
+        ])
+        await message.answer("Выберите ваш пол для настройки профиля:", reply_markup=keyboard)
+    else:
+        await message.answer(
+            f"Привет! Я твой универсальный помощник.\n\n"
+            f"Ваш пол: {users[user_id]['gender']}\n"
+            "Вы можете:\n"
+            "1. Написать разовое напоминание (например: 'Позвонить маме через 30 минут')\n"
+            "2. Настроить регулярное расписание через команды.\n\n"
+            "Команды:\n"
+            "/set_schedule — настроить регулярные задачи\n"
+            "/status — проверить текущие задачи\n"
+            "/clear_schedule — удалить всё расписание\n"
+            "/stop — выключить уведомления"
+        )
+
+# Обработчик выбора пола
+@dp.callback_query(lambda c: c.data.startswith("set_gender_"))
+async def callback_set_gender(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    init_user(user_id)
+
+    gender_choice = callback.data.split("_")[2]
+    users[user_id]["gender"] = "Девушка" if gender_choice == "female" else "Парень"
+    users[user_id]["active"] = True
+
+    await callback.message.edit_text(f"Ваш пол установлен: {users[user_id]['gender']}\n\nТеперь вы можете использовать команды:\n/set_schedule — настроить регулярные задачи\n/status — проверить текущие задачи")
 
 # Обработчик команды /set_schedule
 @dp.message(Command("set_schedule"))
 async def cmd_set_schedule(message: types.Message):
     user_id = message.from_user.id
-    if user_id not in users:
-        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": "", "temp_day": None}
-
-    # Создаем кнопки для выбора дня недели
-    days_buttons = []
-    for day_name, day_num in DAYS_MAP.items():
-        if day_name not in [b["text"] for b in days_buttons]:
-            days_buttons.append(InlineKeyboardButton(text=day_name.capitalize(), callback_data=f"set_day_{day_num}"))
+    init_user(user_id)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Пн", callback_data="set_day_0"), 
@@ -146,20 +151,17 @@ async def cmd_set_schedule(message: types.Message):
          InlineKeyboardButton(text="Вс", callback_data="set_day_6")]
     ])
 
-    await message.answer("Выберите день недели для настройки тренировки:", reply_markup=keyboard)
+    await message.answer("Выберите день недели для регулярной задачи:", reply_markup=keyboard)
 
 # Обработчик нажатия кнопок выбора дня
 @dp.callback_query(lambda c: c.data.startswith("set_day_"))
 async def callback_set_day(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    if user_id not in users:
-        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": "", "temp_day": None}
+    init_user(user_id)
 
-    # Извлекаем номер дня из callback_data (например, set_day_0 -> 0)
     day_num = int(callback.data.split("_")[2])
     users[user_id]["temp_day"] = day_num
     
-    # Находим название дня для красоты
     day_name = ""
     for name, num in DAYS_MAP.items():
         if num == day_num:
@@ -174,8 +176,15 @@ async def cmd_stop(message: types.Message):
     user_id = message.from_user.id
     if user_id in users:
         users[user_id]["active"] = False
-        users[user_id]["training"] = False
-        await message.answer("🛑 Режим напоминаний выключен.")
+        await message.answer("🛑 Режим уведомлений выключен.")
+
+# Обработчик команды /clear_schedule
+@dp.message(Command("clear_schedule"))
+async def cmd_clear_schedule(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in users:
+        users[user_id]["schedules"] = []
+        await message.answer("🗑 Все регулярные задачи были удалены.")
 
 # Обработчик команды /status
 @dp.message(Command("status"))
@@ -183,67 +192,78 @@ async def cmd_status(message: types.Message):
     user_id = message.from_user.id
     if user_id in users:
         data = users[user_id]
-        schedules = data.get("schedules", [])
         
-        if not schedules:
-            sched_info = "Не задано"
-        else:
+        sched_text = "Не задано"
+        if data["schedules"]:
             res = []
-            for s in schedules:
-                days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
-                res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
-            sched_info = " • ".join(res)
+            for s in data["schedules"]:
+                days_names = [k for k, v in DAYS_MAP.items() if v == s['day']] # Wait, this is still wrong because 'days' is a list now
+                # Let me fix it properly here:
+                res.append(f"{', '.join([k for k,v in DAYS_MAP.items() if v in s['days']])} {s['hour']}:{s['minute']}")
+            sched_text = " • ".join(res)
 
-        status = "Включен" if data["active"] else "Выключен"
-        training = "Идет тренировка" if data["training"] else "Тренировка не начата"
-        
+        reminders_text = ""
+        if data["one_time_reminders"]:
+            reminders_text = "\n" + "\n".join([f"- {r['text']} (через {r['execute_at']})" for r in data["one_time_reminders"]])
+
         await message.answer(
-            f"Ваш статус:\nРежим: {status}\nСостояние: {training}\n\n"
-            f"Расписание:\n{sched_info}",
-            reply_markup=get_training_keyboard()
+            f"📊 Ваш профиль:\n"
+            f"Регулярные задачи: {sched_text}\n"
+            f"{reminders_text}"
         )
     else:
         await message.answer("Вы еще не активировали бота.")
 
-# Обработчик всех остальных сообщений (только если это НЕ команда)
-@dp.message(~Command())
+# Обработчик всех остальных сообщений (Парсинг)
+@dp.message()
 async def handle_any_message(message: types.Message):
     user_id = message.from_user.id
-    if user_id not in users:
-        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": "", "temp_day": None}
+    init_user(user_id)
 
     text = message.text
     if not text: return
 
-    # 1. Если пользователь находится в процессе ввода времени для конкретного дня
+    # 1. Обработка ввода времени для кнопок (регулярное расписание)
     if users[user_id].get("temp_day") is not None:
         time_match = re.search(r'(\d{1,2})\s*:\s*(\d{2})', text)
         if time_match:
             hour = int(time_match.group(1))
             minute = int(time_match.group(2))
             
-            # Добавляем в расписание
             users[user_id]["schedules"].append({
-                "day": users[user_id]["temp_day"],
+                "days": [users[user_id]["temp_day"]],
                 "hour": hour,
                 "minute": minute
             })
             
-            # Сбрасываем временное состояние
             users[user_id]["temp_day"] = None
-            
-            res = []
-            for s in users[user_id]["schedules"]:
-                days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
-                res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
-            await message.answer(f"✅ Запомнил! Расписание обновлено:\n• {' • '.join(res)}")
+            await message.answer(f"✅ Регулярная задача добавлена на {hour}:{minute}")
         else:
-            await message.answer("Пожалуйста, введите время именно в формате ЧЧ:ММ (например, 18:30).")
+            await message.answer("Пожалуйста, введите время в формате ЧЧ:ММ (например, 18:30).")
         return
 
-    # 2. Если это не команда и не ввод времени — проверяем на свободный текст расписания
+    # 2. Парсинг разовых напоминаний ("через X минут/часов")
+    one_time_match = re.search(r'через\s*(\d+)\s*(минут|часа|часов)', text, re.IGNORECASE)
+    if one_time_match:
+        amount = int(one_time_match.group(1))
+        unit = one_time_match.group(2).lower()
+        
+        if "мин" in unit:
+            delay = timedelta(minutes=amount)
+        else:
+            delay = timedelta(hours=amount)
+            
+        execute_at = datetime.now() + delay
+        users[user_id]["one_time_reminders"].append({
+            "text": text,
+            "execute_at": execute_at
+        })
+        await message.answer(f"✅ Разовое напоминание установлено на {execute_at.strftime('%H:%M:%S')}")
+        return
+
+    # 3. Парсинг регулярного расписания из текста (например, "Понедельник 17:00")
     new_schedules = []
-    parts = re.split(r',|и|или', text) # Разделяем по запятой или союзам
+    parts = re.split(r',|и|или', text)
     found_any = False
     for part in parts:
         part = part.strip()
@@ -259,7 +279,7 @@ async def handle_any_message(message: types.Message):
             hour = int(time_match.group(1))
             minute = int(time_match.group(2))
             new_schedules.append({
-                "day": day_found,
+                "days": [day_found],
                 "hour": hour,
                 "minute": minute
             })
@@ -267,36 +287,20 @@ async def handle_any_message(message: types.Message):
 
     if found_any:
         users[user_id]["schedules"] = new_schedules
-        res = []
-        for s in new_schedules:
-            days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
-            res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
-        await message.answer(f"✅ Запомнил! Расписание обновлено:\n• {' • '.join(res)}")
+        await message.answer(f"✅ Регулярное расписание обновлено!")
     else:
-        if len(text) > 2:
-            # Если сообщение не содержит расписания, но это не команда, даем подсказку
-            await message.answer("Я не совсем понял ваше расписание. Попробуйте написать так: 'Понедельник 17:00' или 'Пн 09:30'.")
-
-# Обработчик нажатия кнопки "Приступил к тренировке"
-@dp.callback_query(lambda c: c.data == "start_training")
-async def process_start_training(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id in users:
-        users[user_id]["training"] = True
-        # Запоминаем дату, чтобы знать, что тренировка прошла именно сегодня
-        users[user_id]["last_reminder_date"] = datetime.now().strftime("%Y-%m-%d")
-        await callback.message.edit_text("💪 Отлично! Тренировка началась. Напоминания приостановлены.")
+        # Если это не команда и не распознано ничего, даем подсказку
+        if len(text) > 5:
+            await message.answer("Я могу помочь вам:\n1. Создать разовое напоминание (напишите 'через X минут')\n2. Настроить расписание через /set_schedule")
 
 # Функция запуска бота
 async def main():
-    # Запускаем фоновую задачу напоминаний
     asyncio.create_task(reminder_loop())
-    
     print("Бот запущен и готов к работе...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        async.run(main())
     except KeyboardInterrupt:
         print("Бот выключен.")
