@@ -168,8 +168,45 @@ async def callback_set_day(callback: types.CallbackQuery):
 
     await callback.message.edit_text(f"Вы выбрали {day_name.capitalize()}. Теперь напишите время в формате ЧЧ:ММ (например, 18:30).")
 
-# Обработчик всех остальных сообщений
-@dp.message()
+# Обработчик команды /stop
+@dp.message(Command("stop"))
+async def cmd_stop(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in users:
+        users[user_id]["active"] = False
+        users[user_id]["training"] = False
+        await message.answer("🛑 Режим напоминаний выключен.")
+
+# Обработчик команды /status
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in users:
+        data = users[user_id]
+        schedules = data.get("schedules", [])
+        
+        if not schedules:
+            sched_info = "Не задано"
+        else:
+            res = []
+            for s in schedules:
+                days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
+                res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
+            sched_info = " • ".join(res)
+
+        status = "Включен" if data["active"] else "Выключен"
+        training = "Идет тренировка" if data["training"] else "Тренировка не начата"
+        
+        await message.answer(
+            f"Ваш статус:\nРежим: {status}\nСостояние: {training}\n\n"
+            f"Расписание:\n{sched_info}",
+            reply_markup=get_training_keyboard()
+        )
+    else:
+        await message.answer("Вы еще не активировали бота.")
+
+# Обработчик всех остальных сообщений (только если это НЕ команда)
+@dp.message(~Command())
 async def handle_any_message(message: types.Message):
     user_id = message.from_user.id
     if user_id not in users:
@@ -239,43 +276,6 @@ async def handle_any_message(message: types.Message):
         if len(text) > 2:
             # Если сообщение не содержит расписания, но это не команда, даем подсказку
             await message.answer("Я не совсем понял ваше расписание. Попробуйте написать так: 'Понедельник 17:00' или 'Пн 09:30'.")
-
-# Обработчик команды /stop
-@dp.message(Command("stop"))
-async def cmd_stop(message: types.Message):
-    user_id = message.from_user.id
-    if user_id in users:
-        users[user_id]["active"] = False
-        users[user_id]["training"] = False
-        await message.answer("🛑 Режим напоминаний выключен.")
-
-# Обработчик команды /status
-@dp.message(Command("status"))
-async def cmd_status(message: types.Message):
-    user_id = message.from_user.id
-    if user_id in users:
-        data = users[user_id]
-        schedules = data.get("schedules", [])
-        
-        if not schedules:
-            sched_info = "Не задано"
-        else:
-            res = []
-            for s in schedules:
-                days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
-                res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
-            sched_info = " • ".join(res)
-
-        status = "Включен" if data["active"] else "Выключен"
-        training = "Идет тренировка" if data["training"] else "Тренировка не начата"
-        
-        await message.answer(
-            f"Ваш статус:\nРежим: {status}\nСостояние: {training}\n\n"
-            f"Расписание:\n{sched_info}",
-            reply_markup=get_training_keyboard()
-        )
-    else:
-        await message.answer("Вы еще не активировали бота.")
 
 # Обработчик нажатия кнопки "Приступил к тренировке"
 @dp.callback_query(lambda c: c.data == "start_training")
