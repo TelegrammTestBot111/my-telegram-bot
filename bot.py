@@ -21,13 +21,6 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # Хранилище данных пользователей (в оперативной памяти)
-# Структура: {user_id: {
-#   "active": bool, 
-#   "gender": str | None,
-#   "schedules": [{"days": [int], "hour": int, "minute": int}], # Повторяющееся
-#   "one_time_reminders": [{"text": str, "execute_at": datetime}], # Разовое
-#   "last_reminder_date": str (YYYY-MM-DD)
-# }}
 users = {}
 
 DAYS_MAP = {
