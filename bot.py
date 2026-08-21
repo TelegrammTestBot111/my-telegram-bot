@@ -105,65 +105,13 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         "Привет! Я твой умный бот-напоминалка.\n\n"
-        "Я буду напоминать тебе о тренировках в удобное время.\n\n"
+        "Просто напиши мне свои тренировки в свободном стиле, например:\n"
+        "• Понедельник 17:00\n"
+        "• Четверг и Суббота 18:30\n\n"
         "Команды:\n"
-        "/set_schedule Понедельник 17:00, Четверг 18:30 — задать график (можно писать как удобно)\n"
         "/status — проверить текущий статус и расписание\n"
         "/stop — выключить всё"
     )
-
-# Обработчик команды /set_schedule
-@dp.message(Command("set_schedule"))
-async def cmd_set_schedule(message: types.Message):
-    user_id = message.from_user.id
-    if user_id not in users:
-        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": ""}
-
-    try:
-        # Пример ввода: /set_schedule Понедельник 17:00, Четверг 18:30
-        text = message.text.split(maxsplit=1)[1]
-        
-        new_schedules = []
-        # Регулярное выражение для поиска пар "День Время"
-        # Ищет слова из нашего словаря дней и время в формате ЧЧ:ММ
-        parts = re.split(r',|и|или', text) # Разделяем по запятой или союзам
-        for part in parts:
-            part = part.strip()
-            if not part: continue
-            
-            # Ищем день недели в строке
-            day_found = None
-            for day_name, day_num in DAYS_MAP.items():
-                if day_name in part.lower():
-                    day_found = day_num
-                    break
-            
-            # Ищем время в строке (ЧЧ:ММ)
-            time_match = re.search(r'(\d{1,2}):(\d{2})', part)
-            if day_found and time_match:
-                hour = int(time_match.group(1))
-                minute = int(time_match.group(2))
-                new_schedules.append({
-                    "day": day_found,
-                    "hour": hour,
-                    "minute": minute
-                })
-
-        if not new_schedules:
-            await message.answer("Не удалось распознать расписание. Попробуйте написать так: 'Понедельник 17:00, Четверг 18:30'")
-            return
-
-        users[user_id]["schedules"] = new_schedules
-        
-        # Формируем красивую строку для ответа
-        res = []
-        for s in new_schedules:
-            days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
-            res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
-        
-        await message.answer(f"✅ Расписание обновлено:\n• {' • '.join(res)}")
-    except Exception as e:
-        await message.answer(f"Ошибка при настройке расписания. Попробуйте написать проще, например: 'Пн 17:00, Ср 18:30'")
 
 # Обработчик команды /stop
 @dp.message(Command("stop"))
@@ -200,6 +148,51 @@ async def cmd_status(message: types.Message):
         )
     else:
         await message.answer("Вы еще не активировали бота.")
+
+# Обработчик всех остальных сообщений (умный парсинг без команд)
+@dp.message()
+async def handle_natural_language(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in users:
+        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": ""}
+
+    text = message.text
+    # Ищем дни недели и время в тексте сообщения
+    new_schedules = []
+    parts = re.split(r',|и|или', text) # Разделяем по запятой или союзам
+    
+    found_any = False
+    for part in parts:
+        part = part.strip()
+        if not part: continue
+        
+        day_found = None
+        for day_name, day_num in DAYS_MAP.items():
+            if day_name in part.lower():
+                day_found = day_num
+                break
+        
+        time_match = re.search(r'(\d{1,2}):(\d{2})', part)
+        if day_found and time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2))
+            new_schedules.append({
+                "day": day_found,
+                "hour": hour,
+                "minute": minute
+            })
+            found_any = True
+
+    if found_any:
+        users[user_id]["schedules"] = new_schedules
+        res = []
+        for s in new_schedules:
+            days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
+            res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
+        await message.answer(f"✅ Запомнил! Расписание обновлено:\n• {' • '.join(res)}")
+    else:
+        # Если сообщение не содержит расписания, мы просто игнорируем его (чтобы бот не отвечал на каждое "Привет")
+        pass
 
 # Обработчик нажатия кнопки "Приступил к тренировке"
 @dp.callback_query(lambda c: c.data == "start_training")
