@@ -190,9 +190,8 @@ async def cmd_status(message: types.Message):
         if data["schedules"]:
             res = []
             for s in data["schedules"]:
-                days_names = [k for k, v in DAYS_MAP.items() if v == s['day']] # Wait, this is still wrong because 'days' is a list now
-                # Let me fix it properly here:
-                res.append(f"{', '.join([k for k,v in DAYS_MAP.items() if v in s['days']])} {s['hour']}:{s['minute']}")
+                days_names = [k for k, v in DAYS_MAP.items() if v in s['days']]
+                res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
             sched_text = " • ".join(res)
 
         reminders_text = ""
