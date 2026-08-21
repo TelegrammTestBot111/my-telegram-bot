@@ -49,14 +49,17 @@ def is_scheduled_day(days_list):
 # Функция для проверки, наступило ли время тренировки
 def is_training_time(schedule):
     now = datetime.now()
+    # Если текущее время больше запланированного (например, сейчас 05:40, а было 05:37)
     if now.hour > schedule["hour"]:
         return True # Время уже прошло сегодня (или мы в режиме ожидания)
+    # Если час совпадает, проверяем минуты
     if now.hour == schedule["hour"] and now.minute >= schedule["minute"]:
         return True
     return False
 
 # Функция для отправки напоминания всем активным пользователям
 async def reminder_loop():
+    logging.info("Фоновая задача напоминаний запущена.")
     while True:
         await asyncio.sleep(60)  # Пауза 60 секунд
         now = datetime.now()
@@ -66,30 +69,27 @@ async def reminder_loop():
             if not data["active"]:
                 continue
             
-            # Если пользователь уже тренируется сегодня — пропускаем
+            # Если пользователь уже нажал кнопку "Приступил к тренировке" сегодня — пропускаем
             if data["training"] and data.get("last_reminder_date") == today_str:
                 continue
 
             schedules = data.get("schedules", [])
             for sched in schedules:
                 days_list = sched.get("days", [])
-                # Проверяем, подходит ли сегодня под расписание
+                # Проверяем, подходит ли сегодня под расписание дня недели
                 if days_list and is_scheduled_day(days_list):
                     # Если наступило время тренировки (или оно уже прошло сегодня)
                     if is_training_time(sched):
-                        # Если мы еще не пометили этот день как "тренировка началась"
-                        if data.get("last_reminder_date") != today_str:
-                            try:
-                                await bot.send_message(
-                                    user_id, 
-                                    f"⏰ Пора тренироваться! (Запланировано на {sched['hour']}:{sched['minute']})"
-                                )
-                                # Мы не ставим last_reminder_date здесь, так как мы хотим напоминать каждую минуту
-                                # пока он не нажмет кнопку. Но нам нужно знать, что это "сегодняшний" цикл.
-                            except TelegramForbiddenError:
-                                logging.warning(f"Пользователь {user_id} заблокировал бота.")
-                            except Exception as e:
-                                logging.error(f"Ошибка при отправке напоминания пользователю {user_id}: {e}")
+                        try:
+                            await bot.send_message(
+                                user_id, 
+                                f"⏰ Пора тренироваться! (Запланировано на {sched['hour']}:{sched['minute']})"
+                            )
+                            logging.info(f"Отправлено напоминание пользователю {user_id}")
+                        except TelegramForbiddenError:
+                            logging.warning(f"Пользователь {user_id} заблокировал бота.")
+                        except Exception as e:
+                            logging.error(f"Ошибка при отправке напоминания пользователю {user_id}: {e}")
 
 # Обработчик команды /start
 @dp.message(Command("start"))
@@ -112,6 +112,54 @@ async def cmd_start(message: types.Message):
         "/status — проверить текущий статус и расписание\n"
         "/stop — выключить всё"
     )
+
+# Обработчик команды /set_schedule
+@dp.message(Command("set_schedule"))
+async def cmd_set_schedule(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in users:
+        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": ""}
+
+    try:
+        # Пример ввода: /set_schedule Понедельник 17:00, Четверг 18:30
+        text = message.text.split(maxsplit=1)[1]
+        
+        new_schedules = []
+        parts = re.split(r',|и|или', text) # Разделяем по запятой или союзам
+        for part in parts:
+            part = part.strip()
+            if not part: continue
+            
+            day_found = None
+            lower_part = part.lower()
+            for day_name, day_num in DAYS_MAP.items():
+                if day_name in lower_part:
+                    day_found = day_num
+                    break
+            
+            time_match = re.search(r'(\d{1,2})\s*:\s*(\d{2})', part)
+            if day_found and time_match:
+                hour = int(time_match.group(1))
+                minute = int(time_match.group(2))
+                new_schedules.append({
+                    "day": day_found,
+                    "hour": hour,
+                    "minute": minute
+                })
+
+        if not new_schedules:
+            await message.answer("Не удалось распознать расписание. Попробуйте написать так: 'Понедельник 17:00, Четверг 18:30'")
+            return
+
+        users[user_id]["schedules"] = new_schedules
+        
+        res = []
+        for s in new_schedules:
+            days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
+            res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
+        await message.answer(f"✅ Расписание обновлено:\n• {' • '.join(res)}")
+    except Exception as e:
+        await message.answer(f"Ошибка при настройке расписания. Попробуйте написать проще, например: 'Пн 17:00, Ср 18:30'")
 
 # Обработчик команды /stop
 @dp.message(Command("stop"))
@@ -167,14 +215,12 @@ async def handle_natural_language(message: types.Message):
         if not part: continue
         
         day_found = None
-        # Проверяем наличие дня недели в строке (регистронезависимо)
         lower_part = part.lower()
         for day_name, day_num in DAYS_MAP.items():
             if day_name in lower_part:
                 day_found = day_num
                 break
         
-        # Ищем время в строке (ЧЧ:ММ) с учетом возможных пробелов вокруг двоеточия
         time_match = re.search(r'(\d{1,2})\s*:\s*(\d{2})', part)
         if day_found and time_match:
             hour = int(time_match.group(1))
@@ -194,8 +240,7 @@ async def handle_natural_language(message: types.Message):
             res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
         await message.answer(f"✅ Запомнил! Расписание обновлено:\n• {' • '.join(res)}")
     else:
-        # Если сообщение не содержит расписания, но это не команда, даем подсказку
-        if len(text) > 2: # Игнорируем слишком короткие сообщения типа "ок" или "привет"
+        if len(text) > 2:
             await message.answer("Я не совсем понял ваше расписание. Попробуйте написать так: 'Понедельник 17:00' или 'Пн 09:30'.")
 
 # Обработчик нажатия кнопки "Приступил к тренировке"
