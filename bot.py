@@ -167,12 +167,15 @@ async def handle_natural_language(message: types.Message):
         if not part: continue
         
         day_found = None
+        # Проверяем наличие дня недели в строке (регистронезависимо)
+        lower_part = part.lower()
         for day_name, day_num in DAYS_MAP.items():
-            if day_name in part.lower():
+            if day_name in lower_part:
                 day_found = day_num
                 break
         
-        time_match = re.search(r'(\d{1,2}):(\d{2})', part)
+        # Ищем время в строке (ЧЧ:ММ) с учетом возможных пробелов вокруг двоеточия
+        time_match = re.search(r'(\d{1,2})\s*:\s*(\d{2})', part)
         if day_found and time_match:
             hour = int(time_match.group(1))
             minute = int(time_match.group(2))
@@ -191,8 +194,9 @@ async def handle_natural_language(message: types.Message):
             res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
         await message.answer(f"✅ Запомнил! Расписание обновлено:\n• {' • '.join(res)}")
     else:
-        # Если сообщение не содержит расписания, мы просто игнорируем его (чтобы бот не отвечал на каждое "Привет")
-        pass
+        # Если сообщение не содержит расписания, но это не команда, даем подсказку
+        if len(text) > 2: # Игнорируем слишком короткие сообщения типа "ок" или "привет"
+            await message.answer("Я не совсем понял ваше расписание. Попробуйте написать так: 'Понедельник 17:00' или 'Пн 09:30'.")
 
 # Обработчик нажатия кнопки "Приступил к тренировке"
 @dp.callback_query(lambda c: c.data == "start_training")
