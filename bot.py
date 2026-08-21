@@ -25,7 +25,8 @@ dp = Dispatcher()
 #   "active": bool, 
 #   "training": bool,
 #   "schedules": [{"day": int, "hour": int, "minute": int}],
-#   "last_reminder_date": str (YYYY-MM-DD)
+#   "last_reminder_date": str (YYYY-MM-DD),
+#   "temp_day": int | None (для настройки расписания)
 # }}
 users = {}
 
@@ -49,13 +50,18 @@ def is_scheduled_day(days_list):
 # Функция для проверки, наступило ли время тренировки
 def is_training_time(schedule):
     now = datetime.now()
-    # Если текущее время больше запланированного (например, сейчас 05:40, а было 05:37)
     if now.hour > schedule["hour"]:
         return True # Время уже прошло сегодня (или мы в режиме ожидания)
-    # Если час совпадает, проверяем минуты
     if now.hour == schedule["hour"] and now.minute >= schedule["minute"]:
         return True
     return False
+
+# Функция для создания клавиатуры с кнопкой тренировки
+def get_training_keyboard():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💪 Приступил к тренировке", callback_data="start_training")]
+    ])
+    return kb
 
 # Функция для отправки напоминания всем активным пользователям
 async def reminder_loop():
@@ -69,7 +75,7 @@ async def reminder_loop():
             if not data["active"]:
                 continue
             
-            # Если пользователь уже нажал кнопку "Приступил к тренировке" сегодня — пропускаем
+            # Если пользователь уже тренируется сегодня — пропускаем
             if data["training"] and data.get("last_reminder_date") == today_str:
                 continue
 
@@ -80,16 +86,19 @@ async def reminder_loop():
                 if days_list and is_scheduled_day(days_list):
                     # Если наступило время тренировки (или оно уже прошло сегодня)
                     if is_training_time(sched):
-                        try:
-                            await bot.send_message(
-                                user_id, 
-                                f"⏰ Пора тренироваться! (Запланировано на {sched['hour']}:{sched['minute']})"
-                            )
-                            logging.info(f"Отправлено напоминание пользователю {user_id}")
-                        except TelegramForbiddenError:
-                            logging.warning(f"Пользователь {user_id} заблокировал бота.")
-                        except Exception as e:
-                            logging.error(f"Ошибка при отправке напоминания пользователю {user_id}: {e}")
+                        # Если мы еще не пометили этот день как "тренировка началась"
+                        if data.get("last_reminder_date") != today_str:
+                            try:
+                                await bot.send_message(
+                                    user_id, 
+                                    f"⏰ Пора тренироваться! (Запланировано на {sched['hour']}:{sched['minute']})",
+                                    reply_markup=get_training_keyboard()
+                                )
+                                logging.info(f"Отправлено напоминание пользователю {user_id}")
+                            except TelegramForbiddenError:
+                                logging.warning(f"Пользователь {user_id} заблокировал бота.")
+                            except Exception as e:
+                                logging.error(f"Ошибка при отправке напоминания пользователю {user_id}: {e}")
 
 # Обработчик команды /start
 @dp.message(Command("start"))
@@ -100,7 +109,8 @@ async def cmd_start(message: types.Message):
             "active": False, 
             "training": False,
             "schedules": [],
-            "last_reminder_date": ""
+            "last_reminder_date": "",
+            "temp_day": None
         }
     
     await message.answer(
@@ -109,6 +119,7 @@ async def cmd_start(message: types.Message):
         "• Понедельник 17:00\n"
         "• Четверг и Суббота 18:30\n\n"
         "Команды:\n"
+        "/set_schedule — открыть меню настройки дней\n"
         "/status — проверить текущий статус и расписание\n"
         "/stop — выключить всё"
     )
@@ -118,91 +129,52 @@ async def cmd_start(message: types.Message):
 async def cmd_set_schedule(message: types.Message):
     user_id = message.from_user.id
     if user_id not in users:
-        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": ""}
+        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": "", "temp_day": None}
 
-    try:
-        # Пример ввода: /set_schedule Понедельник 17:00, Четверг 18:30
-        text = message.text.split(maxsplit=1)[1]
-        
-        new_schedules = []
-        parts = re.split(r',|и|или', text) # Разделяем по запятой или союзам
-        for part in parts:
-            part = part.strip()
-            if not part: continue
-            
-            day_found = None
-            lower_part = part.lower()
-            for day_name, day_num in DAYS_MAP.items():
-                if day_name in lower_part:
-                    day_found = day_num
-                    break
-            
-            time_match = re.search(r'(\d{1,2})\s*:\s*(\d{2})', part)
-            if day_found and time_match:
-                hour = int(time_match.group(1))
-                minute = int(time_match.group(2))
-                new_schedules.append({
-                    "day": day_found,
-                    "hour": hour,
-                    "minute": minute
-                })
+    # Создаем кнопки для выбора дня недели
+    days_buttons = []
+    for day_name, day_num in DAYS_MAP.items():
+        if day_name not in [b["text"] for b in days_buttons]:
+            days_buttons.append(InlineKeyboardButton(text=day_name.capitalize(), callback_data=f"set_day_{day_num}"))
 
-        if not new_schedules:
-            await message.answer("Не удалось распознать расписание. Попробуйте написать так: 'Понедельник 17:00, Четверг 18:30'")
-            return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Пн", callback_data="set_day_0"), 
+         InlineKeyboardButton(text="Вт", callback_data="set_day_1"),
+         InlineKeyboardButton(text="Ср", callback_data="set_day_2")],
+        [InlineKeyboardButton(text="Чт", callback_data="set_day_3"),
+         InlineKeyboardButton(text="Пт", callback_data="set_day_4"),
+         InlineKeyboardButton(text="Сб", callback_data="set_day_5"),
+         InlineKeyboardButton(text="Вс", callback_data="set_day_6")]
+    ])
 
-        users[user_id]["schedules"] = new_schedules
-        
-        res = []
-        for s in new_schedules:
-            days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
-            res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
-        await message.answer(f"✅ Расписание обновлено:\n• {' • '.join(res)}")
-    except Exception as e:
-        await message.answer(f"Ошибка при настройке расписания. Попробуйте написать проще, например: 'Пн 17:00, Ср 18:30'")
+    await message.answer("Выберите день недели для настройки тренировки:", reply_markup=keyboard)
 
-# Обработчик команды /stop
-@dp.message(Command("stop"))
-async def cmd_stop(message: types.Message):
-    user_id = message.from_user.id
-    if user_id in users:
-        users[user_id]["active"] = False
-        users[user_id]["training"] = False
-        await message.answer("🛑 Режим напоминаний выключен.")
+# Обработчик нажатия кнопок выбора дня
+@dp.callback_query(lambda c: c.data.startswith("set_day_"))
+async def callback_set_day(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users:
+        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": "", "temp_day": None}
 
-# Обработчик команды /status
-@dp.message(Command("status"))
-async def cmd_status(message: types.Message):
-    user_id = message.from_user.id
-    if user_id in users:
-        data = users[user_id]
-        schedules = data.get("schedules", [])
-        
-        if not schedules:
-            sched_info = "Не задано"
-        else:
-            res = []
-            for s in schedules:
-                days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
-                res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
-            sched_info = " • ".join(res)
+    # Извлекаем номер дня из callback_data (например, set_day_0 -> 0)
+    day_num = int(callback.data.split("_")[2])
+    users[user_id]["temp_day"] = day_num
+    
+    # Находим название дня для красоты
+    day_name = ""
+    for name, num in DAYS_MAP.items():
+        if num == day_num:
+            day_name = name
+            break
 
-        status = "Включен" if data["active"] else "Выключен"
-        training = "Идет тренировка" if data["training"] else "Тренировка не начата"
-        
-        await message.answer(
-            f"Ваш статус:\nРежим: {status}\nСостояние: {training}\n\n"
-            f"Расписание:\n{sched_info}"
-        )
-    else:
-        await message.answer("Вы еще не активировали бота.")
+    await callback.message.edit_text(f"Вы выбрали {day_name.capitalize()}. Теперь напишите время в формате ЧЧ:ММ (например, 18:30).")
 
-# Обработчик всех остальных сообщений (умный парсинг без команд)
+# Обработчик всех остальных сообщений
 @dp.message()
-async def handle_natural_language(message: types.Message):
+async def handle_any_message(message: types.Message):
     user_id = message.from_user.id
     if user_id not in users:
-        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": ""}
+        users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": "", "temp_day": None}
 
     text = message.text
     # Ищем дни недели и время в тексте сообщения
@@ -241,7 +213,45 @@ async def handle_natural_language(message: types.Message):
         await message.answer(f"✅ Запомнил! Расписание обновлено:\n• {' • '.join(res)}")
     else:
         if len(text) > 2:
+            # Если сообщение не содержит расписания, но это не команда, даем подсказку
             await message.answer("Я не совсем понял ваше расписание. Попробуйте написать так: 'Понедельник 17:00' или 'Пн 09:30'.")
+
+# Обработчик команды /stop
+@dp.message(Command("stop"))
+async def cmd_stop(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in users:
+        users[user_id]["active"] = False
+        users[user_id]["training"] = False
+        await message.answer("🛑 Режим напоминаний выключен.")
+
+# Обработчик команды /status
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in users:
+        data = users[user_id]
+        schedules = data.get("schedules", [])
+        
+        if not schedules:
+            sched_info = "Не задано"
+        else:
+            res = []
+            for s in schedules:
+                days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
+                res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
+            sched_info = " • ".join(res)
+
+        status = "Включен" if data["active"] else "Выключен"
+        training = "Идет тренировка" if data["training"] else "Тренировка не начата"
+        
+        await message.answer(
+            f"Ваш статус:\nРежим: {status}\nСостояние: {training}\n\n"
+            f"Расписание:\n{sched_info}",
+            reply_markup=get_training_keyboard()
+        )
+    else:
+        await message.answer("Вы еще не активировали бота.")
 
 # Обработчик нажатия кнопки "Приступил к тренировке"
 @dp.callback_query(lambda c: c.data == "start_training")
