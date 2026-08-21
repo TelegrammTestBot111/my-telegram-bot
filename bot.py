@@ -91,8 +91,7 @@ async def reminder_loop():
                             try:
                                 await bot.send_message(
                                     user_id, 
-                                    f"⏰ Пора тренироваться! (Запланировано на {sched['hour']}:{sched['minute']})",
-                                    reply_markup=get_training_keyboard()
+                                    f"⏰ Пора тренироваться! (Запланировано на {sched['hour']}:{sched['minute']})"
                                 )
                                 logging.info(f"Отправлено напоминание пользователю {user_id}")
                             except TelegramForbiddenError:
@@ -177,22 +176,47 @@ async def handle_any_message(message: types.Message):
         users[user_id] = {"active": False, "training": False, "schedules": [], "last_reminder_date": "", "temp_day": None}
 
     text = message.text
-    # Ищем дни недели и время в тексте сообщения
+    if not text: return
+
+    # 1. Если пользователь находится в процессе ввода времени для конкретного дня
+    if users[user_id].get("temp_day") is not None:
+        time_match = re.search(r'(\d{1,2})\s*:\s*(\d{2})', text)
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2))
+            
+            # Добавляем в расписание
+            users[user_id]["schedules"].append({
+                "day": users[user_id]["temp_day"],
+                "hour": hour,
+                "minute": minute
+            })
+            
+            # Сбрасываем временное состояние
+            users[user_id]["temp_day"] = None
+            
+            res = []
+            for s in users[user_id]["schedules"]:
+                days_names = [k for k, v in DAYS_MAP.items() if v == s['day']]
+                res.append(f"{', '.join(days_names)} {s['hour']}:{s['minute']}")
+            await message.answer(f"✅ Запомнил! Расписание обновлено:\n• {' • '.join(res)}")
+        else:
+            await message.answer("Пожалуйста, введите время именно в формате ЧЧ:ММ (например, 18:30).")
+        return
+
+    # 2. Если это не команда и не ввод времени — проверяем на свободный текст расписания
     new_schedules = []
     parts = re.split(r',|и|или', text) # Разделяем по запятой или союзам
-    
     found_any = False
     for part in parts:
         part = part.strip()
         if not part: continue
-        
         day_found = None
         lower_part = part.lower()
         for day_name, day_num in DAYS_MAP.items():
             if day_name in lower_part:
                 day_found = day_num
                 break
-        
         time_match = re.search(r'(\d{1,2})\s*:\s*(\d{2})', part)
         if day_found and time_match:
             hour = int(time_match.group(1))
